@@ -26,9 +26,28 @@ final class PiPWindowController {
     private var lastKnownTime: Double = 0
     private var isDismissing = false
     private var ignoreStopUntil = Date.distantPast
+    private var braveObserver: NSObjectProtocol?
 
     var onUserDismiss: ((PiPPlaybackSnapshot) -> Void)?
     var shouldIgnoreStop: Bool { Date() < ignoreStopUntil }
+
+    init() {
+        braveObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didActivateApplicationNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] note in
+            guard let app = note.userInfo?[NSWorkspace.applicationUserInfoKey] as? NSRunningApplication,
+                  app.bundleIdentifier == "com.brave.Browser" else { return }
+            self?.braveDidBecomeActive()
+        }
+    }
+
+    deinit {
+        if let braveObserver {
+            NSWorkspace.shared.notificationCenter.removeObserver(braveObserver)
+        }
+    }
     private var exitHideArmed = false
     private var pointerWasInside = false
 
@@ -184,8 +203,12 @@ final class PiPWindowController {
         let handle = DragHandleView(frame: handleRect)
         handle.autoresizingMask = [.width, .minYMargin]
         handle.windowRef = win
-        handle.onClose = { [weak self] in self?.userDismiss(jumpToBrave: false) }
-        handle.onJumpToBrave = { [weak self] in self?.userDismiss(jumpToBrave: true) }
+        handle.onClose = { [weak self] in
+            self?.userDismiss(jumpToBrave: false, pausedOverride: true)
+        }
+        handle.onJumpToBrave = { [weak self] in
+            self?.userDismiss(jumpToBrave: true, pausedOverride: false)
+        }
         container.addSubview(handle)
         self.dragHandle = handle
 
@@ -269,12 +292,28 @@ final class PiPWindowController {
         log("Fenêtre PiP fermée.")
     }
 
-    // ─── Boutons de la barre : fermer ou revenir à Brave ────────────────────
-    private func userDismiss(jumpToBrave: Bool) {
+    // AltTab active Brave, mais la fenêtre .screenSaver retient l'ancien Space :
+    // le menu affiche Brave alors que l'autre app reste à l'écran. On retire le
+    // PiP tout de suite, puis on réactive Brave pour que ses fenêtres arrivent.
+    private func braveDidBecomeActive() {
+        guard isPiPActive, !isDismissing else { return }
+        log("Brave revient au premier plan : le PiP libère l'écran.")
+        window?.level = .normal
+        window?.orderOut(nil)
+        userDismiss(jumpToBrave: true, pausedOverride: nil)
+    }
+
+    // pausedOverride : true = pause forcée (croix), false = lecture forcée
+    // (bouton retour), nil = conserver l'état réel du lecteur.
+    private func userDismiss(jumpToBrave: Bool, pausedOverride: Bool?) {
         guard isPiPActive, !isDismissing else { return }
         isDismissing = true
         ignoreStopUntil = Date().addingTimeInterval(2)
-        let fallback = PiPPlaybackSnapshot(timestamp: lastKnownTime, paused: !jumpToBrave)
+        window?.orderOut(nil)
+        let fallback = PiPPlaybackSnapshot(
+            timestamp: lastKnownTime,
+            paused: pausedOverride ?? lastKnownPaused
+        )
         guard let webView = webView else {
             finishDismiss(fallback, jumpToBrave: jumpToBrave)
             return
@@ -284,7 +323,7 @@ final class PiPWindowController {
             let parsed = self?.parseSnapshot(result) ?? fallback
             let outgoing = PiPPlaybackSnapshot(
                 timestamp: parsed.timestamp,
-                paused: jumpToBrave ? false : true
+                paused: pausedOverride ?? parsed.paused
             )
             self?.finishDismiss(outgoing, jumpToBrave: jumpToBrave)
         }
@@ -292,10 +331,11 @@ final class PiPWindowController {
 
     private func finishDismiss(_ snapshot: PiPPlaybackSnapshot, jumpToBrave: Bool) {
         onUserDismiss?(snapshot)
-        if jumpToBrave {
-            activateBrave()
-        }
         close()
+        guard jumpToBrave else { return }
+        DispatchQueue.main.async { [weak self] in
+            self?.activateBrave()
+        }
     }
 
     private func activateBrave() {

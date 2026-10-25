@@ -20,7 +20,9 @@ final class DraggableWindow: NSWindow {
         self.hasShadow = true
         self.isMovableByWindowBackground = true
         self.level = .screenSaver
-        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle]
+        // .stationary bloque le changement de Space : AltTab active Brave
+        // (le nom s'affiche en haut à gauche) mais l'ancien bureau reste affiché.
+        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
         self.isReleasedWhenClosed = false
         self.standardWindowButton(.closeButton)?.isHidden = true
         self.standardWindowButton(.miniaturizeButton)?.isHidden = true
