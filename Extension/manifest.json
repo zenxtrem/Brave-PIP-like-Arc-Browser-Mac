@@ -1,0 +1,26 @@
+{
+  "manifest_version": 3,
+  "name": "Brave Auto PiP (YouTube → Swift Player)",
+  "version": "2.1.0",
+  "description": "Met en pause la vidéo YouTube et la délègue à un lecteur PiP local (Swift) quand Brave perd le focus, puis resynchronise au retour.",
+  "permissions": ["activeTab", "tabs"],
+  "host_permissions": [
+    "https://*.youtube.com/*",
+    "http://*.youtube.com/*"
+  ],
+  "background": {
+    "service_worker": "background.js",
+    "type": "module"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.youtube.com/*", "http://*.youtube.com/*"],
+      "js": ["content.js"],
+      "run_at": "document_idle",
+      "all_frames": false
+    }
+  ],
+  "action": {
+    "default_title": "Brave Auto PiP"
+  }
+}
