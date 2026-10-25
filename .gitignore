@@ -1,0 +1,4 @@
+.DS_Store
+MacDaemon/.build/
+MacDaemon/.swiftpm/
+*.log

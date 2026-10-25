@@ -6,7 +6,9 @@
   "permissions": ["activeTab", "tabs"],
   "host_permissions": [
     "https://*.youtube.com/*",
-    "http://*.youtube.com/*"
+    "http://*.youtube.com/*",
+    "http://127.0.0.1/*",
+    "http://localhost/*"
   ],
   "background": {
     "service_worker": "background.js",

@@ -14,28 +14,49 @@ final class WebSocketServer {
     private let queue = DispatchQueue(label: "websocket.server")
     private var connections: [NWConnection] = []
     private let connectionsLock = NSLock()
+    private let listeningLock = NSLock()
+    private var listening = false
+
+    var isListening: Bool {
+        listeningLock.lock()
+        defer { listeningLock.unlock() }
+        return listening
+    }
 
     init(port: UInt16, windowController: PiPWindowController) {
         self.port = NWEndpoint.Port(rawValue: port)!
         self.windowController = windowController
+        windowController.onUserDismiss = { [weak self] snapshot in
+            self?.sendToAll(json: [
+                "action": "SYNC_TIME",
+                "timestamp": snapshot.timestamp,
+                "paused": snapshot.paused
+            ])
+        }
     }
 
     // ─── Démarrage / arrêt ───────────────────────────────────────────────────
     func start() {
+        if listener != nil { return }
         do {
             let params = NWParameters.tcp
             params.allowLocalEndpointReuse = true
             let listener = try NWListener(using: params, on: port)
             listener.newConnectionHandler = { [weak self] conn in
                 self?.handleNewConnection(conn)
+                
             }
-            listener.stateUpdateHandler = { state in
+            listener.stateUpdateHandler = { [weak self] state in
+                guard let self = self else { return }
                 switch state {
                 case .ready:
+                    self.setListening(true)
                     log("WebSocket listener prêt sur le port \(self.port.rawValue).")
                 case .failed(let err):
-                    log("WebSocket listener échec: \(err)")
+                    self.setListening(false)
+                    self.failStartup(err)
                 case .cancelled:
+                    self.setListening(false)
                     log("WebSocket listener annulé.")
                 default:
                     break
@@ -44,14 +65,51 @@ final class WebSocketServer {
             listener.start(queue: queue)
             self.listener = listener
         } catch {
-            log("Impossible de créer le listener: \(error)")
+            failStartup(error)
         }
     }
 
+    /// Le listener n'a pas pu binder le port. On quitte tout de suite :
+    /// continuer sans WebSocket laisse l'extension échouer en silence
+    /// (« connection to ws://127.0.0.1:8765 failed »).
+    private func failStartup(_ error: Error) {
+        let portNumber = port.rawValue
+        log("Impossible d'écouter sur le port \(portNumber) : \(error)")
+        if Self.isAddressInUse(error) {
+            log("Le port \(portNumber) est déjà pris. Un ancien BravePiPPlayer tourne encore.")
+            log("Arrête-le avec : pkill -f BravePiPPlayer")
+            log("Puis relance : swift run")
+        }
+        exit(1)
+    }
+
+    private static func isAddressInUse(_ error: Error) -> Bool {
+        if let nw = error as? NWError, case .posix(let code) = nw {
+            return code == .EADDRINUSE
+        }
+        let ns = error as NSError
+        return ns.domain == NSPOSIXErrorDomain && ns.code == Int(EADDRINUSE)
+    }
+
     func stop() {
+        setListening(false)
         listener?.cancel()
+        listener = nil
         let conns = currentConnections()
         for c in conns { c.cancel() }
+    }
+
+    /// Relance l'écoute si elle n'est pas déjà en place. Ne crée pas un second listener.
+    func ensureListening() {
+        if listener == nil {
+            start()
+        }
+    }
+
+    private func setListening(_ value: Bool) {
+        listeningLock.lock()
+        listening = value
+        listeningLock.unlock()
     }
 
     // ─── Gestion des connexions ─────────────────────────────────────────────
@@ -211,16 +269,25 @@ final class WebSocketServer {
                 self?.windowController.showPiPWindow(videoId: videoId, timestamp: timestamp)
             }
         case "STOP":
-            log("STOP reçu.")
             DispatchQueue.main.async { [weak self] in
-                self?.windowController.stopAndSync { timestamp in
-                    if let t = timestamp {
-                        self?.sendToAll(json: ["action": "SYNC_TIME", "timestamp": t])
+                guard let self = self else { return }
+                if self.windowController.shouldIgnoreStop {
+                    log("STOP ignoré : fermeture déjà demandée par un bouton du PiP.")
+                    return
+                }
+                log("STOP reçu.")
+                self.windowController.stopAndSync { snapshot in
+                    if let snapshot = snapshot {
+                        self.sendToAll(json: [
+                            "action": "SYNC_TIME",
+                            "timestamp": snapshot.timestamp,
+                            "paused": snapshot.paused
+                        ])
                     } else {
                         // Aucune fenêtre PiP n'était ouverte : on notifie l'extension
                         // pour qu'elle n'attende pas de SYNC_TIME et ne déclenche pas
                         // de lecture intempestive.
-                        self?.sendToAll(json: ["action": "NO_PIP"])
+                        self.sendToAll(json: ["action": "NO_PIP"])
                     }
                 }
             }

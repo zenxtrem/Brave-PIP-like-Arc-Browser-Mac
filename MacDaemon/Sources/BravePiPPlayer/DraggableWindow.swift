@@ -46,5 +46,5 @@ final class DraggableWindow: NSWindow {
 
     // Garde la fenêtre au niveau .screenSaver même si le système tente de la rétrograder.
     override var canBecomeKey: Bool { true }
-    override var canBecomeMain: Bool { true }
+    override var canBecomeMain: Bool { false }
 }

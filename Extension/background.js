@@ -117,7 +117,11 @@ function handleServerMessage(payload) {
   const action = payload?.action;
   if (action === "SYNC_TIME") {
     // Diffusion à tous les onglets YouTube (le content script appliquera le sync).
-    broadcastToYouTubeTabs({ type: "SYNC_TIME", timestamp: payload.timestamp });
+    broadcastToYouTubeTabs({
+      type: "SYNC_TIME",
+      timestamp: payload.timestamp,
+      paused: !!payload.paused,
+    });
   } else if (action === "NO_PIP") {
     // Le daemon n'avait pas de fenêtre PiP : on notifie les onglets pour
     // qu'ils annulent leur attente de SYNC_TIME.

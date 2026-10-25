@@ -1,4 +1,0 @@
-Target dependency graph (2 targets)
-Target 'AllExcludingTests' in project 'Aggregate'
-➜ Explicit dependency on target 'BravePiPPlayer-product' in project 'BravePiPPlayer'
-Target 'BravePiPPlayer-product' in project 'BravePiPPlayer' (no dependencies)

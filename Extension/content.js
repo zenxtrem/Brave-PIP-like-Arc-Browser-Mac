@@ -90,7 +90,7 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message !== "object") return false;
     if (message.type === "SYNC_TIME") {
-      applySyncTime(Number(message.timestamp));
+      applySyncTime(Number(message.timestamp), !!message.paused);
       sendResponse({ ok: true });
     } else if (message.type === "NO_PIP") {
       // Le daemon n'avait pas de fenêtre PiP ouverte : on annule l'attente.
@@ -101,7 +101,7 @@
     return false;
   });
 
-  function applySyncTime(timestamp) {
+  function applySyncTime(timestamp, paused) {
     const video = findVideo();
     if (!video) {
       log("SYNC_TIME: aucune <video> trouvée.");
@@ -117,7 +117,25 @@
     isSyncing = true;
     try {
       video.currentTime = timestamp;
-      log(`SYNC_TIME appliqué: currentTime=${timestamp}s`);
+      log(`SYNC_TIME appliqué: currentTime=${timestamp}s paused=${paused}`);
+      if (paused) {
+        // YouTube relance parfois la lecture quand l'onglet redevient visible
+        // ou après un seek. On maintient la pause pendant un court instant.
+        const keepPaused = () => {
+          try { video.pause(); } catch (_) {}
+        };
+        keepPaused();
+        video.addEventListener("play", keepPaused);
+        setTimeout(keepPaused, 50);
+        setTimeout(keepPaused, 250);
+        setTimeout(() => {
+          video.removeEventListener("play", keepPaused);
+          keepPaused();
+          isSyncing = false;
+          pipActive = false;
+        }, 700);
+        return;
+      }
       const playPromise = video.play();
       if (playPromise && typeof playPromise.then === "function") {
         playPromise

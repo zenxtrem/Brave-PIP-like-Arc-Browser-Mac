@@ -5,15 +5,36 @@
 import AppKit
 import WebKit
 
+struct PiPPlaybackSnapshot {
+    let timestamp: Double
+    let paused: Bool
+}
+
 final class PiPWindowController {
     private var window: DraggableWindow?
     private var webView: WKWebView?
     private var dragHandle: DragHandleView?
+    private var controlsView: PiPControlsView?
     private var currentVideoId: String?
     private(set) var isPiPActive: Bool = false
+    private var pollTimer: Timer?
+    private var chromeHideWork: DispatchWorkItem?
+    private var chromeVisible = true
+    private var chromeGeneration = 0
+    private var lastPointer = NSPoint(x: -10_000, y: -10_000)
+    private var lastKnownPaused = false
+    private var lastKnownTime: Double = 0
+    private var isDismissing = false
+    private var ignoreStopUntil = Date.distantPast
+
+    var onUserDismiss: ((PiPPlaybackSnapshot) -> Void)?
+    var shouldIgnoreStop: Bool { Date() < ignoreStopUntil }
+    private var exitHideArmed = false
+    private var pointerWasInside = false
 
     private let initialSize = NSSize(width: 400, height: 225)
-    private let dragHandleHeight: CGFloat = 22
+    private let dragHandleHeight: CGFloat = 32
+    private let controlsHeight: CGFloat = 40
 
     // ─── Ad-Skipper + UI-hider JavaScript ─────────────────────────────────────
     // Injecté via WKUserScript (atDocumentStart pour le CSS, atDocumentEnd pour
@@ -77,8 +98,15 @@ final class PiPWindowController {
         DispatchQueue.main.async { [weak self] in
             self?.instantiateWindowIfNeeded()
             self?.loadVideo(videoId: videoId, timestamp: timestamp)
-            self?.window?.makeKeyAndOrderFront(nil)
+            NSApp.setActivationPolicy(.accessory)
+            self?.window?.orderFrontRegardless()
             self?.isPiPActive = true
+            self?.lastKnownPaused = false
+            self?.pointerWasInside = false
+            self?.exitHideArmed = false
+            self?.lastPointer = NSEvent.mouseLocation
+            self?.startPolling()
+            self?.revealChrome()
             log("Fenêtre PiP affichée pour videoId=\(videoId) à t=\(timestamp)s.")
         }
     }
@@ -86,7 +114,7 @@ final class PiPWindowController {
     // ─── STOP : récupère le currentTime, ferme la fenêtre ───────────────────
     // completion reçoit nil si aucune fenêtre PiP n'était ouverte (pour que le
     // daemon puisse envoyer NO_PIP au lieu de SYNC_TIME).
-    func stopAndSync(completion: @escaping (Double?) -> Void) {
+    func stopAndSync(completion: @escaping (PiPPlaybackSnapshot?) -> Void) {
         DispatchQueue.main.async { [weak self] in
             guard let self = self else {
                 completion(nil)
@@ -98,24 +126,36 @@ final class PiPWindowController {
                 completion(nil)
                 return
             }
-            let js = "(function(){var v=document.querySelector('video');return v?v.currentTime:0;})();"
+            let js = "(function(){var v=document.querySelector('video');if(!v)return null;return JSON.stringify({t:v.currentTime||0,p:!!v.paused});})();"
             webView.evaluateJavaScript(js) { [weak self] result, _ in
-                let t: Double
-                if let n = result as? Double {
-                    t = n
-                } else if let n = result as? NSNumber {
-                    t = n.doubleValue
-                } else if let s = result as? String, let parsed = Double(s) {
-                    t = parsed
-                } else {
-                    t = 0
-                }
-                log("currentTime récupéré depuis le PiP: \(t)s")
+                let snapshot = self?.parseSnapshot(result) ?? PiPPlaybackSnapshot(
+                    timestamp: 0,
+                    paused: self?.lastKnownPaused ?? false
+                )
+                log("État PiP: t=\(snapshot.timestamp)s paused=\(snapshot.paused)")
                 self?.isPiPActive = false
                 self?.close()
-                completion(t)
+                completion(snapshot)
             }
         }
+    }
+
+    private func parseSnapshot(_ result: Any?) -> PiPPlaybackSnapshot? {
+        let raw: String?
+        if let s = result as? String {
+            raw = s
+        } else if let s = result as? NSString {
+            raw = s as String
+        } else {
+            raw = nil
+        }
+        guard let raw, let data = raw.data(using: .utf8),
+              let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+            return nil
+        }
+        let t = (obj["t"] as? Double) ?? (obj["t"] as? NSNumber)?.doubleValue ?? 0
+        let p = (obj["p"] as? Bool) ?? ((obj["p"] as? NSNumber)?.boolValue ?? lastKnownPaused)
+        return PiPPlaybackSnapshot(timestamp: t, paused: p)
     }
 
     // ─── Création de la fenêtre et de la WebView ────────────────────────────
@@ -131,6 +171,7 @@ final class PiPWindowController {
         )
         win.minSize = NSSize(width: 240, height: 135)
         win.maxSize = NSSize(width: 1280, height: 720)
+        win.acceptsMouseMovedEvents = true
 
         // Conteneur avec coins arrondis + clip.
         let container = PiPContainerView(frame: rect)
@@ -141,10 +182,20 @@ final class PiPWindowController {
         let handleRect = NSRect(x: 0, y: rect.height - dragHandleHeight,
                                width: rect.width, height: dragHandleHeight)
         let handle = DragHandleView(frame: handleRect)
-        handle.autoresizingMask = [.width, .height]
+        handle.autoresizingMask = [.width, .minYMargin]
         handle.windowRef = win
+        handle.onClose = { [weak self] in self?.userDismiss(jumpToBrave: false) }
+        handle.onJumpToBrave = { [weak self] in self?.userDismiss(jumpToBrave: true) }
         container.addSubview(handle)
         self.dragHandle = handle
+
+        // ─── Barre de contrôles en bas (overlay) ─────────────────────────────
+        let controlsRect = NSRect(x: 0, y: 0, width: rect.width, height: controlsHeight)
+        let controls = PiPControlsView(frame: controlsRect)
+        controls.autoresizingMask = [.width, .maxYMargin]
+        controls.delegate = self
+        container.addSubview(controls)
+        self.controlsView = controls
 
         // ─── Configuration de la WKWebView ──────────────────────────────────
         let config = WKWebViewConfiguration()
@@ -205,13 +256,207 @@ final class PiPWindowController {
 
     // ─── Fermeture ──────────────────────────────────────────────────────────
     func close() {
+        stopPolling()
+        chromeHideWork?.cancel()
+        chromeHideWork = nil
         if let webView = self.webView {
             webView.stopLoading()
             webView.loadHTMLString("<html></html>", baseURL: nil)
         }
         self.window?.orderOut(nil)
         self.isPiPActive = false
+        self.isDismissing = false
         log("Fenêtre PiP fermée.")
+    }
+
+    // ─── Boutons de la barre : fermer ou revenir à Brave ────────────────────
+    private func userDismiss(jumpToBrave: Bool) {
+        guard isPiPActive, !isDismissing else { return }
+        isDismissing = true
+        ignoreStopUntil = Date().addingTimeInterval(2)
+        let fallback = PiPPlaybackSnapshot(timestamp: lastKnownTime, paused: !jumpToBrave)
+        guard let webView = webView else {
+            finishDismiss(fallback, jumpToBrave: jumpToBrave)
+            return
+        }
+        let js = "(function(){var v=document.querySelector('video');if(!v)return null;return JSON.stringify({t:v.currentTime||0,p:!!v.paused});})();"
+        webView.evaluateJavaScript(js) { [weak self] result, _ in
+            let parsed = self?.parseSnapshot(result) ?? fallback
+            let outgoing = PiPPlaybackSnapshot(
+                timestamp: parsed.timestamp,
+                paused: jumpToBrave ? false : true
+            )
+            self?.finishDismiss(outgoing, jumpToBrave: jumpToBrave)
+        }
+    }
+
+    private func finishDismiss(_ snapshot: PiPPlaybackSnapshot, jumpToBrave: Bool) {
+        onUserDismiss?(snapshot)
+        if jumpToBrave {
+            activateBrave()
+        }
+        close()
+    }
+
+    private func activateBrave() {
+        let bundleID = "com.brave.Browser"
+        if let brave = NSRunningApplication.runningApplications(withBundleIdentifier: bundleID).first {
+            brave.activate(options: [.activateAllWindows, .activateIgnoringOtherApps])
+            log("Brave ramené au premier plan.")
+            return
+        }
+        guard let url = NSWorkspace.shared.urlForApplication(withBundleIdentifier: bundleID) else {
+            log("Brave introuvable.")
+            return
+        }
+        let config = NSWorkspace.OpenConfiguration()
+        config.activates = true
+        NSWorkspace.shared.openApplication(at: url, configuration: config)
+        log("Brave lancé.")
+    }
+
+    // ─── Polling de l'état de la vidéo (currentTime / duration / paused) ──────
+    private func startPolling() {
+        stopPolling()
+        let timer = Timer(timeInterval: 0.25, repeats: true) { [weak self] _ in
+            self?.pollPlaybackState()
+        }
+        RunLoop.main.add(timer, forMode: .common)
+        pollTimer = timer
+    }
+
+    private func stopPolling() {
+        pollTimer?.invalidate()
+        pollTimer = nil
+    }
+
+    private func pollPlaybackState() {
+        pollPointer()
+        guard let webView = webView, isPiPActive else { return }
+        let js = "(function(){var v=document.querySelector('video');if(!v)return null;return JSON.stringify({t:v.currentTime,d:v.duration||0,p:v.paused});})();"
+        webView.evaluateJavaScript(js) { [weak self] result, _ in
+            guard let self = self, let s = result as? String,
+                  let data = s.data(using: .utf8),
+                  let obj = try? JSONSerialization.jsonObject(with: data) as? [String: Any] else {
+                return
+            }
+            let t = (obj["t"] as? Double) ?? 0
+            let d = (obj["d"] as? Double) ?? 0
+            let p = (obj["p"] as? Bool) ?? false
+            self.lastKnownPaused = p
+            self.lastKnownTime = t
+            self.controlsView?.updatePlayback(currentTime: t, duration: d, isPaused: p)
+        }
+    }
+
+    // ─── Chrome auto-hide (barre de drag + contrôles) ────────────────────────
+    // Le PiP flotte au-dessus d'une autre app : les mouseMoved ne sont pas
+    // livrés tant que notre processus n'est pas actif. On suit donc le curseur
+    // via NSEvent.mouseLocation, lisible sans permission d'accessibilité.
+    private func pollPointer() {
+        guard let window = window, window.isVisible else { return }
+        if controlsView?.isUserDragging == true {
+            revealChrome()
+            return
+        }
+        let loc = NSEvent.mouseLocation
+        let inside = window.frame.contains(loc)
+        let moved = hypot(loc.x - lastPointer.x, loc.y - lastPointer.y) > 1.5
+        lastPointer = loc
+        if inside {
+            pointerWasInside = true
+            if moved || exitHideArmed {
+                exitHideArmed = false
+                revealChrome()
+            }
+        } else if pointerWasInside, chromeVisible, !exitHideArmed {
+            pointerWasInside = false
+            exitHideArmed = true
+            scheduleChromeHide(after: 0.25)
+        }
+    }
+
+    private func revealChrome() {
+        chromeHideWork?.cancel()
+        setChromeVisible(true)
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            if self.controlsView?.isUserDragging == true {
+                self.revealChrome()
+                return
+            }
+            self.setChromeVisible(false)
+        }
+        chromeHideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 3, execute: work)
+    }
+
+    private func scheduleChromeHide(after delay: TimeInterval) {
+        chromeHideWork?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self, let window = self.window else { return }
+            if window.frame.contains(NSEvent.mouseLocation) {
+                self.exitHideArmed = false
+                self.revealChrome()
+                return
+            }
+            self.exitHideArmed = false
+            self.setChromeVisible(false)
+        }
+        chromeHideWork = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func setChromeVisible(_ visible: Bool) {
+        guard visible != chromeVisible else { return }
+        chromeVisible = visible
+        chromeGeneration += 1
+        let generation = chromeGeneration
+        let views: [NSView] = [dragHandle as NSView?, controlsView as NSView?].compactMap { $0 }
+        if visible {
+            for view in views {
+                view.isHidden = false
+                view.alphaValue = 0
+            }
+            NSAnimationContext.runAnimationGroup { context in
+                context.duration = 0.18
+                for view in views {
+                    view.animator().alphaValue = 1
+                }
+            }
+        } else {
+            NSAnimationContext.runAnimationGroup({ context in
+                context.duration = 0.22
+                for view in views {
+                    view.animator().alphaValue = 0
+                }
+            }, completionHandler: { [weak self] in
+                guard let self = self, self.chromeGeneration == generation, !self.chromeVisible else { return }
+                views.forEach { $0.isHidden = true }
+            })
+        }
+    }
+}
+
+// ─── PiPControlsDelegate ─────────────────────────────────────────────────────
+extension PiPWindowController: PiPControlsDelegate {
+    func controlsTogglePlayPause() {
+        guard let webView = webView else { return }
+        let js = "(function(){var v=document.querySelector('video');if(!v)return;if(v.paused){v.play();}else{v.pause();}})();"
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    func controlsSeek(toFraction fraction: Double) {
+        guard let webView = webView else { return }
+        let clamped = min(max(fraction, 0), 1)
+        let js = "(function(){var v=document.querySelector('video');if(!v)return;var d=v.duration||0;if(d>0)v.currentTime=\(clamped)*d;})();"
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    func controlsSkip(by seconds: Double) {
+        guard let webView = webView else { return }
+        let js = "(function(){var v=document.querySelector('video');if(!v)return;var t=v.currentTime+\(seconds);if(t<0)t=0;if(v.duration&&t>v.duration)t=v.duration;v.currentTime=t;})();"
+        webView.evaluateJavaScript(js, completionHandler: nil)
     }
 }
 
@@ -234,6 +479,8 @@ final class PiPContainerView: NSView {
 // fenêtre, sans interférer avec les contrôles de la vidéo en dessous.
 final class DragHandleView: NSView {
     weak var windowRef: NSWindow?
+    var onClose: (() -> Void)?
+    var onJumpToBrave: (() -> Void)?
     private var initialMouseLocation: NSPoint = .zero
     private var initialWindowOrigin: NSPoint = .zero
 
@@ -241,14 +488,32 @@ final class DragHandleView: NSView {
         super.init(frame: frameRect)
         wantsLayer = true
         layer?.backgroundColor = NSColor(white: 0, alpha: 0.25).cgColor
-        // Indicateur visuel discret (deux petits points centrés).
+
+        let closeButton = ChromeButton(symbol: "xmark", action: #selector(closeClicked))
+        closeButton.target = self
+        closeButton.toolTip = "Fermer le PiP et mettre la vidéo en pause"
+        let jumpButton = ChromeButton(symbol: "macwindow", action: #selector(jumpClicked))
+        jumpButton.target = self
+        jumpButton.toolTip = "Revenir à Brave et laisser la vidéo tourner"
+
         let label = NSTextField(labelWithString: "⋮⋮")
         label.textColor = NSColor(white: 1, alpha: 0.6)
         label.alignment = .center
         label.font = NSFont.systemFont(ofSize: 10, weight: .medium)
         label.translatesAutoresizingMaskIntoConstraints = false
+
+        addSubview(closeButton)
+        addSubview(jumpButton)
         addSubview(label)
         NSLayoutConstraint.activate([
+            closeButton.trailingAnchor.constraint(equalTo: trailingAnchor, constant: -6),
+            closeButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            closeButton.widthAnchor.constraint(equalToConstant: 22),
+            closeButton.heightAnchor.constraint(equalToConstant: 22),
+            jumpButton.trailingAnchor.constraint(equalTo: closeButton.leadingAnchor, constant: -2),
+            jumpButton.centerYAnchor.constraint(equalTo: centerYAnchor),
+            jumpButton.widthAnchor.constraint(equalToConstant: 22),
+            jumpButton.heightAnchor.constraint(equalToConstant: 22),
             label.centerXAnchor.constraint(equalTo: centerXAnchor),
             label.centerYAnchor.constraint(equalTo: centerYAnchor),
         ])
@@ -256,6 +521,9 @@ final class DragHandleView: NSView {
     required init?(coder: NSCoder) {
         fatalError("init(coder:) not implemented")
     }
+
+    @objc private func closeClicked() { onClose?() }
+    @objc private func jumpClicked() { onJumpToBrave?() }
 
     override func mouseDown(with event: NSEvent) {
         initialMouseLocation = NSEvent.mouseLocation
@@ -268,5 +536,30 @@ final class DragHandleView: NSView {
         let dy = current.y - initialMouseLocation.y
         windowRef?.setFrameOrigin(NSPoint(x: initialWindowOrigin.x + dx,
                                           y: initialWindowOrigin.y + dy))
+    }
+}
+
+/// Bouton du chrome PiP : le premier clic est pris en compte même si l'app
+/// n'est pas au premier plan.
+final class ChromeButton: NSButton {
+    init(symbol: String, action: Selector) {
+        super.init(frame: .zero)
+        image = NSImage(systemSymbolName: symbol, accessibilityDescription: symbol)
+        imagePosition = .imageOnly
+        isBordered = false
+        bezelStyle = .inline
+        contentTintColor = .white
+        target = nil
+        self.action = action
+        translatesAutoresizingMaskIntoConstraints = false
+    }
+    required init?(coder: NSCoder) { fatalError("init(coder:) not implemented") }
+
+    override func acceptsFirstMouse(for event: NSEvent?) -> Bool { true }
+
+    override func mouseDown(with event: NSEvent) {
+        // Le parent DragHandleView démarre un drag sur mouseDown. On consomme
+        // le clic ici pour que la croix et le retour Brave ne déplacent pas la fenêtre.
+        super.mouseDown(with: event)
     }
 }

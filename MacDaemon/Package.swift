@@ -6,7 +6,16 @@ let package = Package(
     targets: [
         .executableTarget(
             name: "BravePiPPlayer",
-            path: "Sources/BravePiPPlayer"
+            path: "Sources/BravePiPPlayer",
+            exclude: ["Info.plist"],
+            linkerSettings: [
+                .unsafeFlags([
+                    "-Xlinker", "-sectcreate",
+                    "-Xlinker", "__TEXT",
+                    "-Xlinker", "__info_plist",
+                    "-Xlinker", "Sources/BravePiPPlayer/Info.plist"
+                ])
+            ]
         )
     ]
 )
