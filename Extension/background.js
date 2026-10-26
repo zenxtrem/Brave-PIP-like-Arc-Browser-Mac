@@ -13,6 +13,7 @@ let ws = null;
 let reconnectAttempts = 0;
 let reconnectTimer = null;
 let pingTimer = null;
+let pipOwnerTabId = null;
 
 // ─── Logging ────────────────────────────────────────────────────────────────
 function log(...args) {
@@ -115,31 +116,23 @@ function send(payload) {
 // ─── Messages reçus du daemon Swift ──────────────────────────────────────────
 function handleServerMessage(payload) {
   const action = payload?.action;
-  if (action === "SYNC_TIME") {
-    // Diffusion à tous les onglets YouTube (le content script appliquera le sync).
-    broadcastToYouTubeTabs({
-      type: "SYNC_TIME",
-      timestamp: payload.timestamp,
-      paused: !!payload.paused,
-    });
-  } else if (action === "NO_PIP") {
-    // Le daemon n'avait pas de fenêtre PiP : on notifie les onglets pour
-    // qu'ils annulent leur attente de SYNC_TIME.
-    broadcastToYouTubeTabs({ type: "NO_PIP" });
-  } else if (action === "PONG" || action === "PING") {
-    // No-op
+  if (action === "SYNC_TIME" || action === "NO_PIP") {
+    const message = action === "SYNC_TIME"
+      ? { type: "SYNC_TIME", timestamp: payload.timestamp, paused: !!payload.paused }
+      : { type: "NO_PIP" };
+    sendToPipOwner(message);
+    pipOwnerTabId = null;
   }
 }
 
-async function broadcastToYouTubeTabs(message) {
-  try {
-    const tabs = await chrome.tabs.query({ url: ["*://*.youtube.com/*"] });
-    for (const tab of tabs) {
-      chrome.tabs.sendMessage(tab.id, message).catch(() => {});
-    }
-  } catch (err) {
-    log("Erreur diffusion onglets:", err);
+function sendToPipOwner(message) {
+  if (pipOwnerTabId == null) {
+    log("Aucun onglet propriétaire du PiP — message ignoré:", message.type);
+    return;
   }
+  chrome.tabs.sendMessage(pipOwnerTabId, message).catch((err) => {
+    log("Envoi au propriétaire du PiP impossible:", err?.message || err);
+  });
 }
 
 // ─── Messages reçus du content script ────────────────────────────────────────
@@ -147,16 +140,38 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || typeof message !== "object") return;
 
   if (message.type === "START") {
-    send({
-      action: "START",
-      videoId: message.videoId,
-      timestamp: message.timestamp,
+    const tabId = sender.tab?.id;
+    const windowId = sender.tab?.windowId;
+    chrome.tabs.query({ active: true, windowId }).then((tabs) => {
+      if (tabId == null || tabs[0]?.id !== tabId) {
+        log("START ignoré : onglet YouTube en arrière-plan", tabId);
+        if (tabId != null) {
+          chrome.tabs.sendMessage(tabId, { type: "START_REJECTED" }).catch(() => {});
+        }
+        sendResponse({ ok: false });
+        return;
+      }
+      pipOwnerTabId = tabId;
+      send({
+        action: "START",
+        videoId: message.videoId,
+        timestamp: message.timestamp,
+      });
+      sendResponse({ ok: true });
+    }).catch((err) => {
+      log("START : query onglet actif impossible:", err);
+      sendResponse({ ok: false });
     });
-    sendResponse({ ok: true });
-    return false;
+    return true;
   }
 
   if (message.type === "STOP") {
+    const tabId = sender.tab?.id;
+    if (pipOwnerTabId != null && tabId !== pipOwnerTabId) {
+      log("STOP ignoré : ne vient pas de l'onglet du PiP", tabId);
+      sendResponse({ ok: false });
+      return false;
+    }
     send({ action: "STOP" });
     sendResponse({ ok: true });
     return false;

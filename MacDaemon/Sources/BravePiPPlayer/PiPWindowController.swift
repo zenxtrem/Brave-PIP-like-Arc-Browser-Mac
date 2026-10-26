@@ -27,6 +27,7 @@ final class PiPWindowController {
     private var isDismissing = false
     private var ignoreStopUntil = Date.distantPast
     private var braveObserver: NSObjectProtocol?
+    private var spaceObserver: NSObjectProtocol?
 
     var onUserDismiss: ((PiPPlaybackSnapshot) -> Void)?
     var shouldIgnoreStop: Bool { Date() < ignoreStopUntil }
@@ -41,12 +42,19 @@ final class PiPWindowController {
                   app.bundleIdentifier == "com.brave.Browser" else { return }
             self?.braveDidBecomeActive()
         }
+        spaceObserver = NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.activeSpaceDidChangeNotification,
+            object: nil,
+            queue: .main
+        ) { [weak self] _ in
+            self?.pipFollowedSpaceChange()
+        }
     }
 
     deinit {
-        if let braveObserver {
-            NSWorkspace.shared.notificationCenter.removeObserver(braveObserver)
-        }
+        let center = NSWorkspace.shared.notificationCenter
+        if let braveObserver { center.removeObserver(braveObserver) }
+        if let spaceObserver { center.removeObserver(spaceObserver) }
     }
     private var exitHideArmed = false
     private var pointerWasInside = false
@@ -116,6 +124,7 @@ final class PiPWindowController {
 
         DispatchQueue.main.async { [weak self] in
             self?.instantiateWindowIfNeeded()
+            self?.window?.applyOverlayBehavior()
             self?.loadVideo(videoId: videoId, timestamp: timestamp)
             NSApp.setActivationPolicy(.accessory)
             self?.window?.orderFrontRegardless()
@@ -298,9 +307,17 @@ final class PiPWindowController {
     private func braveDidBecomeActive() {
         guard isPiPActive, !isDismissing else { return }
         log("Brave revient au premier plan : le PiP libère l'écran.")
-        window?.level = .normal
         window?.orderOut(nil)
         userDismiss(jumpToBrave: true, pausedOverride: nil)
+    }
+
+    /// macOS rattache parfois la fenêtre au bureau où elle a été créée.
+    /// On réapplique l'overlay à chaque changement de bureau.
+    private func pipFollowedSpaceChange() {
+        guard isPiPActive, let window else { return }
+        window.applyOverlayBehavior()
+        window.orderFrontRegardless()
+        log("Changement de bureau : PiP réaffiché par-dessus.")
     }
 
     // pausedOverride : true = pause forcée (croix), false = lecture forcée

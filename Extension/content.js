@@ -10,6 +10,19 @@
   let isSyncing = false;     // bloque les actions START pendant une resync
   let pipActive = false;    // true si on a envoyé un START et qu'on attend un SYNC_TIME
   let lastSentTimestamp = 0;
+  // Reste vrai quelques instants après le passage en arrière-plan, pour
+  // l'onglet qui était vraiment affiché. Les autres onglets YouTube sont
+  // déjà hidden depuis longtemps et ne lancent pas de PiP.
+  let foregroundUntil = document.visibilityState === "visible" ? Infinity : 0;
+
+  document.addEventListener("visibilitychange", () => {
+    if (document.visibilityState === "visible") foregroundUntil = Infinity;
+    else if (foregroundUntil === Infinity) foregroundUntil = Date.now() + 500;
+  });
+
+  function isForegroundTab() {
+    return document.visibilityState === "visible" || Date.now() < foregroundUntil;
+  }
 
   function log(...args) {
     console.log(TAG, ...args);
@@ -50,6 +63,10 @@
   }
 
   function onWindowBlur() {
+    if (!isForegroundTab()) {
+      log("Blur ignoré (onglet YouTube en arrière-plan).");
+      return;
+    }
     if (isSyncing || pipActive) {
       log("Blur ignoré (SYNC_TIME en cours ou PiP déjà actif).");
       return;
@@ -90,7 +107,17 @@
   chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     if (!message || typeof message !== "object") return false;
     if (message.type === "SYNC_TIME") {
+      if (!pipActive) {
+        log("SYNC_TIME ignoré (cet onglet n'a pas ouvert le PiP).");
+        sendResponse({ ok: false });
+        return false;
+      }
       applySyncTime(Number(message.timestamp), !!message.paused);
+      sendResponse({ ok: true });
+    } else if (message.type === "START_REJECTED") {
+      log("START refusé par le background : onglet pas au premier plan.");
+      pipActive = false;
+      isSyncing = false;
       sendResponse({ ok: true });
     } else if (message.type === "NO_PIP") {
       // Le daemon n'avait pas de fenêtre PiP ouverte : on annule l'attente.

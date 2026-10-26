@@ -20,9 +20,7 @@ final class DraggableWindow: NSWindow {
         self.hasShadow = true
         self.isMovableByWindowBackground = true
         self.level = .screenSaver
-        // .stationary bloque le changement de Space : AltTab active Brave
-        // (le nom s'affiche en haut à gauche) mais l'ancien bureau reste affiché.
-        self.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .ignoresCycle]
+        self.collectionBehavior = DraggableWindow.overlayBehavior
         self.isReleasedWhenClosed = false
         self.standardWindowButton(.closeButton)?.isHidden = true
         self.standardWindowButton(.miniaturizeButton)?.isHidden = true
@@ -49,4 +47,14 @@ final class DraggableWindow: NSWindow {
     // Garde la fenêtre au niveau .screenSaver même si le système tente de la rétrograder.
     override var canBecomeKey: Bool { true }
     override var canBecomeMain: Bool { false }
+
+    /// Au-dessus des apps plein écran, visible sur tous les bureaux.
+    static let overlayBehavior: NSWindow.CollectionBehavior = [
+        .canJoinAllSpaces, .fullScreenAuxiliary, .stationary, .ignoresCycle
+    ]
+
+    func applyOverlayBehavior() {
+        level = .screenSaver
+        collectionBehavior = Self.overlayBehavior
+    }
 }
