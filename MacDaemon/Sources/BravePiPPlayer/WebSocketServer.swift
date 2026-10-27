@@ -268,6 +268,10 @@ final class WebSocketServer {
             DispatchQueue.main.async { [weak self] in
                 self?.windowController.showPiPWindow(videoId: videoId, timestamp: timestamp)
             }
+        case "RAISE":
+            DispatchQueue.main.async { [weak self] in
+                self?.windowController.keepAboveBrave()
+            }
         case "STOP":
             DispatchQueue.main.async { [weak self] in
                 guard let self = self else { return }

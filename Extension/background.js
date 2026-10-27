@@ -14,6 +14,8 @@ let reconnectAttempts = 0;
 let reconnectTimer = null;
 let pingTimer = null;
 let pipOwnerTabId = null;
+let previousActiveTabId = null;
+let currentActiveTabId = null;
 
 // ─── Logging ────────────────────────────────────────────────────────────────
 function log(...args) {
@@ -143,7 +145,9 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
     const tabId = sender.tab?.id;
     const windowId = sender.tab?.windowId;
     chrome.tabs.query({ active: true, windowId }).then((tabs) => {
-      if (tabId == null || tabs[0]?.id !== tabId) {
+      const activeId = tabs[0]?.id;
+      const ownsThisSwitch = tabId != null && (tabId === activeId || tabId === previousActiveTabId);
+      if (!ownsThisSwitch) {
         log("START ignoré : onglet YouTube en arrière-plan", tabId);
         if (tabId != null) {
           chrome.tabs.sendMessage(tabId, { type: "START_REJECTED" }).catch(() => {});
@@ -157,6 +161,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
         videoId: message.videoId,
         timestamp: message.timestamp,
       });
+      send({ action: "RAISE" });
       sendResponse({ ok: true });
     }).catch((err) => {
       log("START : query onglet actif impossible:", err);
@@ -198,5 +203,25 @@ chrome.runtime.onStartup.addListener(() => {
   connectWebSocket();
 });
 
-// Le service worker peut être réveillé à tout moment : on tente la connexion.
+chrome.tabs.onActivated.addListener((info) => {
+  previousActiveTabId = currentActiveTabId;
+  currentActiveTabId = info.tabId;
+  if (pipOwnerTabId != null && info.tabId !== pipOwnerTabId) {
+    send({ action: "RAISE" });
+  }
+});
+
+chrome.windows.onFocusChanged.addListener((windowId) => {
+  if (windowId === chrome.windows.WINDOW_ID_NONE || pipOwnerTabId == null) return;
+  chrome.tabs.query({ active: true, windowId }).then((tabs) => {
+    if (tabs[0] && tabs[0].id !== pipOwnerTabId) {
+      send({ action: "RAISE" });
+    }
+  }).catch(() => {});
+});
+
+chrome.tabs.query({ active: true, lastFocusedWindow: true }).then((tabs) => {
+  if (tabs[0]) currentActiveTabId = tabs[0].id;
+}).catch(() => {});
+
 connectWebSocket();

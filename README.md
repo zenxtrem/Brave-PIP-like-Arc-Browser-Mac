@@ -56,7 +56,8 @@ Lancer une vidéo YouTube, puis passer sur une autre application. La fenêtre Pi
 | Barre du bas | Pause, −10 s, +10 s, déplacement dans la vidéo. |
 | Croix, en haut à droite | Ferme le PiP et laisse la vidéo en pause dans Brave. |
 | Fenêtre, à côté de la croix | Ferme le PiP, ramène Brave et continue la lecture. |
-| Retour dans Brave | Ferme le PiP et reprend la vidéo dans l’état où elle était (lecture ou pause). |
+| Retour sur l’onglet YouTube | Ferme le PiP et reprend la vidéo dans l’état où elle était (lecture ou pause). |
+| Autre onglet Brave | Le PiP reste ouvert, au-dessus de Brave. |
 
 Le menu de la barre des menus contient **Activer**, **Relancer** et **Quitter**.
 

@@ -28,6 +28,8 @@ final class PiPWindowController {
     private var ignoreStopUntil = Date.distantPast
     private var braveObserver: NSObjectProtocol?
     private var spaceObserver: NSObjectProtocol?
+    private var ignoringBraveActivation = false
+    private var raiseWork: [DispatchWorkItem] = []
 
     var onUserDismiss: ((PiPPlaybackSnapshot) -> Void)?
     var shouldIgnoreStop: Bool { Date() < ignoreStopUntil }
@@ -135,6 +137,7 @@ final class PiPWindowController {
             self?.lastPointer = NSEvent.mouseLocation
             self?.startPolling()
             self?.revealChrome()
+            self?.scheduleRaiseBurst()
             log("Fenêtre PiP affichée pour videoId=\(videoId) à t=\(timestamp)s.")
         }
     }
@@ -291,6 +294,8 @@ final class PiPWindowController {
         stopPolling()
         chromeHideWork?.cancel()
         chromeHideWork = nil
+        raiseWork.forEach { $0.cancel() }
+        raiseWork = []
         if let webView = self.webView {
             webView.stopLoading()
             webView.loadHTMLString("<html></html>", baseURL: nil)
@@ -301,14 +306,47 @@ final class PiPWindowController {
         log("Fenêtre PiP fermée.")
     }
 
-    // AltTab active Brave, mais la fenêtre .screenSaver retient l'ancien Space :
-    // le menu affiche Brave alors que l'autre app reste à l'écran. On retire le
-    // PiP tout de suite, puis on réactive Brave pour que ses fenêtres arrivent.
+    // Brave redevient actif. On libère l'écran le temps que ses fenêtres arrivent,
+    // sans fermer le PiP : s'il s'agit d'un autre onglet, la fenêtre repasse devant.
+    // Le retour sur l'onglet YouTube envoie STOP et ferme vraiment le PiP.
     private func braveDidBecomeActive() {
+        if ignoringBraveActivation {
+            ignoringBraveActivation = false
+            return
+        }
         guard isPiPActive, !isDismissing else { return }
-        log("Brave revient au premier plan : le PiP libère l'écran.")
+        log("Brave au premier plan : le PiP se replace au-dessus.")
         window?.orderOut(nil)
-        userDismiss(jumpToBrave: true, pausedOverride: nil)
+        ignoringBraveActivation = true
+        DispatchQueue.main.async { [weak self] in
+            self?.activateBrave()
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.scheduleRaiseBurst()
+        }
+    }
+
+    /// Remet la fenêtre au-dessus de Brave. Ignoré si une fermeture est en cours.
+    func raiseAboveBrave() {
+        guard isPiPActive, !isDismissing, let window else { return }
+        window.applyOverlayBehavior()
+    }
+
+    /// Brave réordonne sa fenêtre à chaque changement d'onglet. On répète
+    /// le passage au premier plan pendant une seconde pour gagner cette course.
+    func keepAboveBrave() {
+        scheduleRaiseBurst()
+    }
+
+    private func scheduleRaiseBurst() {
+        raiseWork.forEach { $0.cancel() }
+        raiseWork = [0, 0.12, 0.3, 0.55, 1.0].map { delay in
+            let work = DispatchWorkItem { [weak self] in
+                self?.raiseAboveBrave()
+            }
+            DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+            return work
+        }
     }
 
     /// macOS rattache parfois la fenêtre au bureau où elle a été créée.

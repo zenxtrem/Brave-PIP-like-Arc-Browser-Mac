@@ -54,7 +54,8 @@ final class DraggableWindow: NSWindow {
     ]
 
     func applyOverlayBehavior() {
-        level = .screenSaver
+        level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.screenSaverWindow)))
         collectionBehavior = Self.overlayBehavior
+        orderFrontRegardless()
     }
 }
