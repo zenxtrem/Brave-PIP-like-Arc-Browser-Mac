@@ -19,6 +19,11 @@ final class PiPControlsView: NSView {
 
     var isUserDragging: Bool { return slider.isDragging }
 
+    /// Appelé à chaque tick de polling : casse un éventuel drag fantôme.
+    func clearStaleDrag() {
+        slider.breakStaleDrag()
+    }
+
     override init(frame frameRect: NSRect) {
         super.init(frame: frameRect)
         wantsLayer = true
@@ -94,6 +99,15 @@ final class PiPControlsView: NSView {
 // ─── SeekSlider : NSSlider qui piste l'état de drag ──────────────────────────
 final class SeekSlider: NSSlider {
     private(set) var isDragging = false
+
+    /// Annule un drag fantôme : si un mouseUp a été perdu (fenêtre non active,
+    /// drag interrompu), isDragging resterait à true et pollPointer révélerait
+    /// le chrome en boucle — les barres ne faderaient plus jamais.
+    func breakStaleDrag() {
+        if isDragging && NSEvent.pressedMouseButtons == 0 {
+            isDragging = false
+        }
+    }
 
     override func mouseDown(with event: NSEvent) {
         isDragging = true

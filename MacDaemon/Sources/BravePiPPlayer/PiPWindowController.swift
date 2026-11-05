@@ -65,29 +65,57 @@ final class PiPWindowController {
     private let dragHandleHeight: CGFloat = 32
     private let controlsHeight: CGFloat = 40
 
-    // ─── Ad-Skipper + UI-hider JavaScript ─────────────────────────────────────
-    // Injecté via WKUserScript (atDocumentStart pour le CSS, atDocumentEnd pour
-    // l'Ad-Skipper). La webview est sandboxée (pas d'extensions ni de Brave
-    // Shields), on gère donc les pubs côté client et on masque le chrome YouTube.
+    // ─── Ad-Skipper + UI-hider CSS ───────────────────────────────────────────
+    // Le CSS et l'Ad-Skipper sont injectés via WKUserScript. La webview est
+    // sandboxée (pas d'extensions ni de Brave Shields), on gère donc les pubs
+    // côté client.
+    //
+    // Le chrome YouTube (titre, gros bouton lecture/pause, boutons contextuels)
+    // n'est PAS masqué en permanence : il fade EN MÊME TEMPS que les barres du
+    // PiP, piloté par la classe body.pip-chrome-hidden togglée depuis
+    // setChromeVisible. Les sélecteurs ciblent les enfants directs du lecteur
+    // (.html5-video-player > *) — stables d'une version YouTube à l'autre —
+    // plutôt que les classes internes (.ytp-chrome-top etc.), renommées au fil
+    // des versions : c'est pourquoi le title et le gros bouton play/pause
+    // échappaient à l'ancien masquage.
     static let uiHiderCSS = """
-    .ytp-chrome-top, .ytp-chrome-bottom,
-    .ytp-gradient-top, .ytp-gradient-bottom,
-    .ytp-title-channel, .ytp-title-text, .ytp-cued-thumbnail-overlay,
-    .ytp-show-cards-title, .ytp-pause-overlay, .html5-watermark,
-    .ytp-settings-menu, .ytp-popup-menu, .iv-branding,
-    .ytp-button.ytp-jump-button, .ytp-expand,
-    .ytp-impression-link, .ytp-pause-overlay,
-    .branding-img-container, .ytp-button,
-    .ytp-large-play-button, .ytp-cued-thumbnail-overlay-image {
+    /* Éléments jamais utiles dans le PiP : masqués en permanence. */
+    .ytp-pause-overlay, .html5-watermark, .ytp-impression-link,
+    .iv-branding, .branding-img-container, .ytp-show-cards-title,
+    .ytp-autoheat-title, .ytp-autoheat-link, .ytp-heat-menu,
+    .ytp-settings-menu, .ytp-popup-menu,
+    .ytp-ad-overlay-container, .ytp-ad-message-container {
         display: none !important;
+    }
+
+    /* Chrome YouTube synchronisé avec les barres du PiP : mêmes durées que les
+       animations natives (0,18 s à l'apparition, 0,22 s à la disparition).
+       On ne masque QUE les enfants directs du lecteur — jamais la vidéo,
+       exclue par tag et par classe, et jamais rien au niveau du body (le
+       lecteur peut y être niché dans un wrapper qu'il ne faut pas masquer).
+       L'état caché force visibility:hidden après le fade : une animation JS
+       d'opacité YouTube ne peut pas faire réapparaître l'élément. */
+    .html5-video-player, .html5-video-player * {
+        transition: opacity 0.18s ease, visibility 0s 0s !important;
+        animation: none !important;
+    }
+    body.pip-chrome-hidden .html5-video-player > *:not(video):not(.html5-video-container):not(.html5-main-video):not(.ytp-caption-window-container) {
         opacity: 0 !important;
         visibility: hidden !important;
+        transition: opacity 0.22s ease, visibility 0s 0.22s !important;
+        pointer-events: none !important;
     }
+
+    /* Pas d'interaction directe avec l'UI YouTube : les contrôles passent par
+       les barres du PiP, et on évite toute navigation accidentelle de la
+       webview (les clics programmatiques de l'Ad-Skipper restent possibles). */
+    .html5-video-player a, .html5-video-player button {
+        pointer-events: none !important;
+    }
+
+    /* Fond vidéo noir, sans dégradés. */
     .html5-video-container, .html5-main-video {
         background: #000 !important;
-    }
-    .ytp-autoheat-title, .ytp-autoheat-link, .ytp-heat-menu {
-        display: none !important;
     }
     """
 
@@ -243,9 +271,20 @@ final class PiPWindowController {
         let userContentController = WKUserContentController()
         config.userContentController = userContentController
 
-        // CSS injecté au plus tôt (atDocumentStart) pour masquer le chrome YouTube.
+        // CSS injecté dès que le DOM est prêt (atDocumentEnd). La CSP de la page
+        // embed n'a pas de directive style-src : l'ajout d'un <style> au DOM
+        // n'est pas bloqué (vérifié en direct). Le CSS est interpolé comme
+        // LITTÉRAL JS quoté — l'ancienne version l'interpolait brut
+        // (style.textContent=.ytp-...) : SyntaxError, et aucun style n'était
+        // jamais injecté. Les sélecteurs ciblent les enfants directs du lecteur
+        // (stables) plutôt que les classes internes (renommées au fil des
+        // versions YouTube).
+        let cssLiteral = Self.uiHiderCSS
+            .replacingOccurrences(of: "\\", with: "\\\\")
+            .replacingOccurrences(of: "'", with: "\\'")
+            .replacingOccurrences(of: "\n", with: " ")
         let cssScript = WKUserScript(
-            source: "var style=document.createElement('style');style.textContent=\(Self.uiHiderCSS.replacingOccurrences(of: "\n", with: " "));document.head.appendChild(style);",
+            source: "var style=document.createElement('style');style.textContent='\(cssLiteral)';document.head.appendChild(style);",
             injectionTime: .atDocumentEnd,
             forMainFrameOnly: false
         )
@@ -450,6 +489,7 @@ final class PiPWindowController {
     // via NSEvent.mouseLocation, lisible sans permission d'accessibilité.
     private func pollPointer() {
         guard let window = window, window.isVisible else { return }
+        controlsView?.clearStaleDrag()
         if controlsView?.isUserDragging == true {
             revealChrome()
             return
@@ -507,6 +547,13 @@ final class PiPWindowController {
         chromeVisible = visible
         chromeGeneration += 1
         let generation = chromeGeneration
+        // Chrome YouTube (titre, gros bouton lecture/pause…) fade en même temps
+        // que les barres : on bascule la classe CSS côté page web. Le CSS lui
+        // donne la même transition (0,22 s) que l'animation des barres natives.
+        let js = visible
+            ? "document.body && document.body.classList.remove('pip-chrome-hidden')"
+            : "document.body && document.body.classList.add('pip-chrome-hidden')"
+        webView?.evaluateJavaScript(js, completionHandler: nil)
         let views: [NSView] = [dragHandle as NSView?, controlsView as NSView?].compactMap { $0 }
         if visible {
             for view in views {

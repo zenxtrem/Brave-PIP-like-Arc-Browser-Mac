@@ -37,6 +37,22 @@ L’icône PiP apparaît dans la barre des menus. Le processus ne se place pas d
 
 Une seconde copie s’arrête d’elle-même : un seul daemon peut écouter le port `8765`.
 
+#### Lancement automatique (LaunchAgent)
+
+Pour que le daemon tourne en permanence via le binaire release :
+
+```bash
+cd MacDaemon && swift build -c release
+```
+
+Puis installer `com.brave.pipplayer.plist` (pointant vers `.build/release/BravePiPPlayer`) dans `~/Library/LaunchAgents`, avec `RunAtLoad` et `KeepAlive` à `true`, et charger l’agent :
+
+```bash
+launchctl load ~/Library/LaunchAgents/com.brave.pipplayer.plist
+```
+
+Le daemon redémarre tout seul s’il est tué. Après un rebuild du binaire, il faut le redémarrer (`pkill -x BravePiPPlayer`) pour que la nouvelle version prenne effet.
+
 ### Extension
 
 1. Ouvrir `brave://extensions`.
@@ -51,7 +67,7 @@ Lancer une vidéo YouTube, puis passer sur une autre application. La fenêtre Pi
 
 | Action | Effet |
 | --- | --- |
-| Survol de la fenêtre | Affiche les contrôles. Ils disparaissent après 3 secondes. |
+| Survol de la fenêtre | Affiche les contrôles : barres du PiP et chrome YouTube (titre, gros bouton pause). Tout fade après 3 secondes. |
 | Barre du haut | Déplace la fenêtre. |
 | Barre du bas | Pause, −10 s, +10 s, déplacement dans la vidéo. |
 | Croix, en haut à droite | Ferme le PiP et laisse la vidéo en pause dans Brave. |
@@ -65,6 +81,7 @@ Le menu de la barre des menus contient **Activer**, **Relancer** et **Quitter**.
 
 - Le lecteur utilise `youtube-nocookie.com`. La fenêtre ne partage pas la session Brave : YouTube Premium et les extensions du navigateur n’y sont pas disponibles.
 - Un script dans la fenêtre accélère et saute les publicités vidéo quand elles apparaissent.
+- Le chrome YouTube (titre, gros bouton pause) fade en même temps que les barres du PiP : le daemon bascule une classe CSS sur la page, avec des durées identiques (0,18 s / 0,22 s) et `visibility: hidden` forcé en fin de fade pour qu'aucune animation YouTube ne puisse retarder la disparition.
 - Aucune permission d’accessibilité n’est demandée.
 
 ## Dépannage
@@ -77,6 +94,14 @@ Le menu de la barre des menus contient **Activer**, **Relancer** et **Quitter**.
 pkill -9 -x BravePiPPlayer
 rmdir /tmp/bravepip-relaunch.exclusive 2>/dev/null
 cd MacDaemon && swift run
+```
+
+**Les contrôles du PiP ne disparaissent pas après 3 secondes** (ou le comportement semble être resté à une ancienne version). Le daemon tourne sur un binaire obsolète : le reconstruire puis le redémarrer.
+
+```bash
+cd MacDaemon
+swift build -c release
+pkill -x BravePiPPlayer   # relancé aussitôt par l'agent com.brave.pipplayer
 ```
 
 **Une erreur WebSocket s’affiche alors que Brave vient de démarrer.** L’extension réessaie toute seule. L’erreur disparaît une fois le daemon lancé.
